@@ -4,3 +4,4 @@ keyboard
 mss
 pygetwindow
 pywin32
+pywinauto
