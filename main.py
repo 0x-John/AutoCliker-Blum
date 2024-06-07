@@ -98,7 +98,8 @@ class AutoClicker:
             templates = [
                 cv2.imread(os.path.join("template_png", "template_play_button.png"), cv2.IMREAD_GRAYSCALE),
                 cv2.imread(os.path.join("template_png", "template_play_button1.png"), cv2.IMREAD_GRAYSCALE),
-                cv2.imread(os.path.join("template_png", "close_button.png"), cv2.IMREAD_GRAYSCALE)
+                cv2.imread(os.path.join("template_png", "close_button.png"), cv2.IMREAD_GRAYSCALE),
+                cv2.imread(os.path.join("template_png", "captcha.png"), cv2.IMREAD_GRAYSCALE)  # Добавление нового шаблона
             ]
 
             for template in templates:
@@ -122,9 +123,10 @@ class AutoClicker:
                     cY = pt_y + template_height // 2 + monitor["top"]
 
                     self.click_at(cX, cY)
-                    self.logger.log(f'Нажал на кнопку "Play": {cX} {cY}')
+                    self.logger.log(f'Нажал на кнопку: {cX} {cY}')
                     self.clicked_points.append((cX, cY))
                     break  # Остановить проверку после первого найденного совпадения
+
 
     def click_color_areas(self):
         app = Application().connect(handle=self.hwnd)
