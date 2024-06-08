@@ -12,7 +12,6 @@ import win32con
 import warnings
 from pywinauto import Application
 
-# Интервал проверки кнопки "Play" в секундах
 CHECK_INTERVAL = 5
 
 warnings.filterwarnings("ignore", category=UserWarning, module='pywinauto')
@@ -41,17 +40,20 @@ class Logger:
 
 
 class AutoClicker:
-    def __init__(self, hwnd, target_colors_hex, nearby_colors_hex, threshold, logger, target_percentage):
+    def __init__(self, hwnd, target_colors_hex, nearby_colors_hex, threshold, logger, target_percentage, collect_freeze):
         self.hwnd = hwnd
         self.target_colors_hex = target_colors_hex
         self.nearby_colors_hex = nearby_colors_hex
         self.threshold = threshold
         self.logger = logger
         self.target_percentage = target_percentage
+        self.collect_freeze = collect_freeze
         self.running = False
         self.clicked_points = []
         self.iteration_count = 0
         self.last_check_time = time.time()
+        self.last_freeze_check_time = time.time()
+        self.freeze_cooldown_time = 0
 
     @staticmethod
     def hex_to_hsv(hex_color):
@@ -99,7 +101,7 @@ class AutoClicker:
                 cv2.imread(os.path.join("template_png", "template_play_button.png"), cv2.IMREAD_GRAYSCALE),
                 cv2.imread(os.path.join("template_png", "template_play_button1.png"), cv2.IMREAD_GRAYSCALE),
                 cv2.imread(os.path.join("template_png", "close_button.png"), cv2.IMREAD_GRAYSCALE),
-                cv2.imread(os.path.join("template_png", "captcha.png"), cv2.IMREAD_GRAYSCALE)  # Добавление нового шаблона
+                cv2.imread(os.path.join("template_png", "captcha.png"), cv2.IMREAD_GRAYSCALE)
             ]
 
             for template in templates:
@@ -126,7 +128,6 @@ class AutoClicker:
                     self.logger.log(f'Нажал на кнопку: {cX} {cY}')
                     self.clicked_points.append((cX, cY))
                     break  # Остановить проверку после первого найденного совпадения
-
 
     def click_color_areas(self):
         app = Application().connect(handle=self.hwnd)
@@ -182,12 +183,44 @@ class AutoClicker:
                             self.logger.log(f'Нажал: {cX} {cY}')
                             self.clicked_points.append((cX, cY))
 
+                    if self.collect_freeze:
+                        self.check_and_click_freeze_button(sct, monitor)
                     self.check_and_click_play_button(sct, monitor)
                     time.sleep(0.1)
                     self.iteration_count += 1
                     if self.iteration_count >= 5:
                         self.clicked_points.clear()
                         self.iteration_count = 0
+
+    def check_and_click_freeze_button(self, sct, monitor):
+        freeze_colors_hex = ["#82dce9", "#55ccdc"]  # Добавьте здесь все цвета заморозки
+        freeze_hsvs = [self.hex_to_hsv(color) for color in freeze_colors_hex]
+        current_time = time.time()
+        if current_time - self.last_freeze_check_time >= 1 and current_time >= self.freeze_cooldown_time:
+            self.last_freeze_check_time = current_time
+            img = np.array(sct.grab(monitor))
+            img_bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+            hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+            for freeze_hsv in freeze_hsvs:
+                lower_bound = np.array([max(0, freeze_hsv[0] - 1), 30, 30])
+                upper_bound = np.array([min(179, freeze_hsv[0] + 1), 255, 255])
+                mask = cv2.inRange(hsv, lower_bound, upper_bound)
+                contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+                for contour in contours:
+                    if cv2.contourArea(contour) < 3:
+                        continue
+
+                    M = cv2.moments(contour)
+                    if M["m00"] == 0:
+                        continue
+                    cX = int(M["m10"] / M["m00"]) + monitor["left"]
+                    cY = int(M["m01"] / M["m00"]) + monitor["top"]
+
+                    self.click_at(cX, cY)
+                    self.logger.log(f'Нажал на заморозку: {cX} {cY}')
+                    self.freeze_cooldown_time = time.time() + 4  # Установить паузу на 3 секунды для поиска заморозок
+                    return  # Совершить только один клик
 
 
 if __name__ == "__main__":
@@ -224,6 +257,17 @@ if __name__ == "__main__":
         except ValueError:
             print("Неверный формат. Пожалуйста, введите число.")
 
+    while True:
+        try:
+            collect_freeze = int(input("Кликать заморозку? 1 - ДА, 2 - НЕТ: "))
+            if collect_freeze in [1, 2]:
+                collect_freeze = (collect_freeze == 1)
+                break
+            else:
+                print("Пожалуйста, введите 1 или 2.")
+        except ValueError:
+            print("Неверный формат. Пожалуйста, введите число.")
+
     logger = Logger("[https://t.me/x_0xJohn]")
     logger.log("Вас приветствует бесплатный скрипт - автокликер для игры Blum")
     logger.log('После запуска мини игры нажимайте клавишу F6 на клавиатуре')
@@ -231,7 +275,7 @@ if __name__ == "__main__":
     nearby_colors_hex = ["#abff61", "#87ff27"]
     threshold = 0.8  # Порог совпадения шаблона
 
-    auto_clicker = AutoClicker(hwnd, target_colors_hex, nearby_colors_hex, threshold, logger, target_percentage)
+    auto_clicker = AutoClicker(hwnd, target_colors_hex, nearby_colors_hex, threshold, logger, target_percentage, collect_freeze)
     try:
         auto_clicker.click_color_areas()
     except Exception as e:
