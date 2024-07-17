@@ -11,11 +11,9 @@ import win32api
 import win32con
 import warnings
 from pywinauto import Application
-
-CHECK_INTERVAL = 5
+import config
 
 warnings.filterwarnings("ignore", category=UserWarning, module='pywinauto')
-
 
 def list_windows_by_title(title_keywords):
     windows = gw.getAllWindows()
@@ -27,7 +25,6 @@ def list_windows_by_title(title_keywords):
                 break
     return filtered_windows
 
-
 class Logger:
     def __init__(self, prefix=None):
         self.prefix = prefix
@@ -37,7 +34,6 @@ class Logger:
             print(f"{self.prefix} {data}")
         else:
             print(data)
-
 
 class AutoClicker:
     def __init__(self, hwnd, target_colors_hex, nearby_colors_hex, threshold, logger, target_percentage, collect_freeze):
@@ -54,6 +50,10 @@ class AutoClicker:
         self.last_check_time = time.time()
         self.last_freeze_check_time = time.time()
         self.freeze_cooldown_time = 0
+        self.game_start_time = None
+        self.freeze_count = 0
+        self.target_hsvs = [self.hex_to_hsv(color) for color in self.target_colors_hex]
+        self.nearby_hsvs = [self.hex_to_hsv(color) for color in self.nearby_colors_hex]
 
     @staticmethod
     def hex_to_hsv(hex_color):
@@ -77,8 +77,12 @@ class AutoClicker:
 
     def toggle_script(self):
         self.running = not self.running
-        r_text = "вкл" if self.running else "выкл"
-        self.logger.log(f'Статус изменен: {r_text}')
+        if self.running:
+            self.game_start_time = None
+            self.freeze_count = 0
+            self.logger.log('Скрипт запущен. Ищем кнопку начала игры.')
+        else:
+            self.logger.log('Скрипт остановлен.')
 
     def is_near_color(self, hsv_img, center, target_hsvs, radius=8):
         x, y = center
@@ -95,13 +99,11 @@ class AutoClicker:
 
     def check_and_click_play_button(self, sct, monitor):
         current_time = time.time()
-        if current_time - self.last_check_time >= CHECK_INTERVAL:
+        if current_time - self.last_check_time >= random.uniform(config.CHECK_INTERVAL_MIN, config.CHECK_INTERVAL_MAX):
             self.last_check_time = current_time
             templates = [
                 cv2.imread(os.path.join("template_png", "template_play_button.png"), cv2.IMREAD_GRAYSCALE),
-                cv2.imread(os.path.join("template_png", "template_play_button1.png"), cv2.IMREAD_GRAYSCALE),
-                cv2.imread(os.path.join("template_png", "close_button.png"), cv2.IMREAD_GRAYSCALE),
-                cv2.imread(os.path.join("template_png", "captcha.png"), cv2.IMREAD_GRAYSCALE)
+                cv2.imread(os.path.join("template_png", "template_play_button1.png"), cv2.IMREAD_GRAYSCALE)
             ]
 
             for template in templates:
@@ -127,6 +129,8 @@ class AutoClicker:
                     self.click_at(cX, cY)
                     self.logger.log(f'Нажал на кнопку: {cX} {cY}')
                     self.clicked_points.append((cX, cY))
+                    self.game_start_time = time.time()
+                    self.freeze_count = 0  # Сбросить счетчик заморозок при начале новой игры
                     break  # Остановить проверку после первого найденного совпадения
 
     def click_color_areas(self):
@@ -134,11 +138,9 @@ class AutoClicker:
         window = app.window(handle=self.hwnd)
         window.set_focus()
 
-        target_hsvs = [self.hex_to_hsv(color) for color in self.target_colors_hex]
-        nearby_hsvs = [self.hex_to_hsv(color) for color in self.nearby_colors_hex]
-
         with mss.mss() as sct:
-            keyboard.add_hotkey('F6', self.toggle_script)
+            keyboard.add_hotkey(config.HOTKEY, self.toggle_script)
+            self.logger.log(f'Нажмите {config.HOTKEY} для запуска/остановки скрипта.')
 
             while True:
                 if self.running:
@@ -153,48 +155,64 @@ class AutoClicker:
                     img_bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
                     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
 
-                    for target_hsv in target_hsvs:
-                        lower_bound = np.array([max(0, target_hsv[0] - 1), 30, 30])
-                        upper_bound = np.array([min(179, target_hsv[0] + 1), 255, 255])
-                        mask = cv2.inRange(hsv, lower_bound, upper_bound)
-                        contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                    if self.game_start_time is None:
+                        self.check_and_click_play_button(sct, monitor)
+                    elif self.is_game_over():
+                        self.logger.log('Игра окончена.')
+                        self.random_delay_before_restart()
+                        self.game_start_time = None
+                    else:
+                        self.click_on_targets(hsv, monitor, sct)
+                time.sleep(0.1)
 
-                        num_contours = len(contours)
-                        num_to_click = int(num_contours * self.target_percentage)
-                        contours_to_click = random.sample(contours, num_to_click)
+    def is_game_over(self):
+        game_duration = 30 + self.freeze_count * 3
+        current_time = time.time()
+        if self.game_start_time and current_time - self.game_start_time >= game_duration - 0.5:
+            return True
+        return False
 
-                        for contour in reversed(contours_to_click):
-                            if cv2.contourArea(contour) < 6:
-                                continue
+    def click_on_targets(self, hsv, monitor, sct):
+        for target_hsv in self.target_hsvs:
+            lower_bound = np.array([max(0, target_hsv[0] - 1), 30, 30])
+            upper_bound = np.array([min(179, target_hsv[0] + 1), 255, 255])
+            mask = cv2.inRange(hsv, lower_bound, upper_bound)
+            contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-                            M = cv2.moments(contour)
-                            if M["m00"] == 0:
-                                continue
-                            cX = int(M["m10"] / M["m00"]) + monitor["left"]
-                            cY = int(M["m01"] / M["m00"]) + monitor["top"]
+            num_contours = len(contours)
+            num_to_click = int(num_contours * self.target_percentage)
+            contours_to_click = random.sample(contours, num_to_click)
 
-                            if not self.is_near_color(hsv, (cX - monitor["left"], cY - monitor["top"]), nearby_hsvs):
-                                continue
+            for contour in reversed(contours_to_click):
+                if cv2.contourArea(contour) < 6:
+                    continue
 
-                            if any(math.sqrt((cX - px) ** 2 + (cY - py) ** 2) < 35 for px, py in self.clicked_points):
-                                continue
-                            cY += 5
-                            self.click_at(cX, cY)
-                            self.logger.log(f'Нажал: {cX} {cY}')
-                            self.clicked_points.append((cX, cY))
+                M = cv2.moments(contour)
+                if M["m00"] == 0:
+                    continue
+                cX = int(M["m10"] / M["m00"]) + monitor["left"]
+                cY = int(M["m01"] / M["m00"]) + monitor["top"]
 
-                    if self.collect_freeze:
-                        self.check_and_click_freeze_button(sct, monitor)
-                    self.check_and_click_play_button(sct, monitor)
-                    time.sleep(0.1)
-                    self.iteration_count += 1
-                    if self.iteration_count >= 5:
-                        self.clicked_points.clear()
-                        self.iteration_count = 0
+                if not self.is_near_color(hsv, (cX - monitor["left"], cY - monitor["top"]), self.nearby_hsvs):
+                    continue
+
+                if any(math.sqrt((cX - px) ** 2 + (cY - py) ** 2) < 35 for px, py in self.clicked_points):
+                    continue
+                cY += 5
+                self.click_at(cX, cY)
+                self.logger.log(f'Нажал: {cX} {cY}')
+                self.clicked_points.append((cX, cY))
+
+        if self.collect_freeze:
+            self.check_and_click_freeze_button(sct, monitor)
+        
+        self.iteration_count += 1
+        if self.iteration_count >= 5:
+            self.clicked_points.clear()
+            self.iteration_count = 0
 
     def check_and_click_freeze_button(self, sct, monitor):
-        freeze_colors_hex = ["#82dce9", "#55ccdc"]  # Добавьте здесь все цвета заморозки
-        freeze_hsvs = [self.hex_to_hsv(color) for color in freeze_colors_hex]
+        freeze_hsvs = [self.hex_to_hsv(color) for color in config.FREEZE_COLORS_HEX]
         current_time = time.time()
         if current_time - self.last_freeze_check_time >= 1 and current_time >= self.freeze_cooldown_time:
             self.last_freeze_check_time = current_time
@@ -219,16 +237,49 @@ class AutoClicker:
 
                     self.click_at(cX, cY)
                     self.logger.log(f'Нажал на заморозку: {cX} {cY}')
-                    self.freeze_cooldown_time = time.time() + 4  # Установить паузу на 3 секунды для поиска заморозок
-                    return  # Совершить только один клик
+                    self.freeze_cooldown_time = time.time() + 4  # Установить паузу на 4 секунды для поиска заморозок
+                    self.freeze_count += 1
 
+                    # Проверка цвета пикселя через 1 секунду после клика
+                    time.sleep(1)
+
+                    img_check = np.array(sct.grab(monitor))
+                    img_bgr_check = cv2.cvtColor(img_check, cv2.COLOR_BGRA2BGR)
+                    hsv_check = cv2.cvtColor(img_bgr_check, cv2.COLOR_BGR2HSV)
+
+                    right_bottom_x = monitor["width"] - config.OFFSET_X
+                    right_bottom_y = monitor["height"] - config.OFFSET_Y
+
+                    if right_bottom_x >= img_check.shape[1] or right_bottom_y >= img_check.shape[0]:
+                        self.logger.log('Ошибка: правый нижний угол выходит за пределы изображения')
+                        return
+
+                    pixel_hsv = hsv_check[right_bottom_y, right_bottom_x]
+
+                    # Вывод цвета пикселя в консоль
+                    # self.logger.log(f'Цвет пикселя в правом нижнем углу: {pixel_hsv}')
+
+                    # Подсветка пикселя (закомментировано, включить для отладки)
+                    # cv2.circle(img_bgr_check, (right_bottom_x, right_bottom_y), 5, (0, 0, 255), 2)
+                    # cv2.imwrite('pixel_check.png', img_bgr_check)
+
+                    # Проверка на черный цвет
+                    if np.array_equal(pixel_hsv, [0, 0, 0]):
+                        self.freeze_count -= 1
+                        self.logger.log('Ошибка: ложный клик по заморозке')
+
+                    return
+
+    def random_delay_before_restart(self):
+        delay = random.uniform(config.CHECK_INTERVAL_MIN, config.CHECK_INTERVAL_MAX)
+        self.logger.log(f'Задержка перед перезапуском: {delay:.2f} секунд.')
+        time.sleep(delay)
 
 if __name__ == "__main__":
     current_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(current_dir)
 
-    keywords = ["Blum", "Telegram"]
-    windows = list_windows_by_title(keywords)
+    windows = list_windows_by_title(config.KEYWORDS)
 
     if not windows:
         print("Нет окон, содержащих указанные ключевые слова Blum или Telegram.")
@@ -270,12 +321,8 @@ if __name__ == "__main__":
 
     logger = Logger("[https://t.me/x_0xJohn]")
     logger.log("Вас приветствует бесплатный скрипт - автокликер для игры Blum")
-    logger.log('После запуска мини игры нажимайте клавишу F6 на клавиатуре')
-    target_colors_hex = ["#c9e100", "#bae70e"]
-    nearby_colors_hex = ["#abff61", "#87ff27"]
-    threshold = 0.8  # Порог совпадения шаблона
 
-    auto_clicker = AutoClicker(hwnd, target_colors_hex, nearby_colors_hex, threshold, logger, target_percentage, collect_freeze)
+    auto_clicker = AutoClicker(hwnd, config.TARGET_COLORS_HEX, config.NEARBY_COLORS_HEX, config.THRESHOLD, logger, target_percentage, collect_freeze)
     try:
         auto_clicker.click_color_areas()
     except Exception as e:
