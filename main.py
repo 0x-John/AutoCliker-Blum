@@ -163,6 +163,7 @@ class AutoClicker:
                         self.game_start_time = None
                     else:
                         self.click_on_targets(hsv, monitor, sct)
+                        self.find_and_click_dog_image(sct, monitor)
                 time.sleep(0.1)
 
     def is_game_over(self):
@@ -205,11 +206,46 @@ class AutoClicker:
 
         if self.collect_freeze:
             self.check_and_click_freeze_button(sct, monitor)
-        
+
         self.iteration_count += 1
         if self.iteration_count >= 5:
             self.clicked_points.clear()
             self.iteration_count = 0
+
+    def find_and_click_dog_image(self, sct, monitor):
+        template = cv2.imread(os.path.join("template_png", "dogs.png"), cv2.IMREAD_GRAYSCALE)
+        if template is None:
+            self.logger.log("Не вдалося завантажити шаблон dogs.png.")
+            return
+
+        scales = [0.5, 0.75, 1.0, 1.25, 1.5]
+        found = False
+
+        for scale in scales:
+            resized_template = cv2.resize(template, (0, 0), fx=scale, fy=scale)
+            template_height, template_width = resized_template.shape
+
+            img = np.array(sct.grab(monitor))
+            img_gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+
+            res = cv2.matchTemplate(img_gray, resized_template, cv2.TM_CCOEFF_NORMED)
+            loc = np.where(res >= self.threshold)
+
+            matched_points = list(zip(*loc[::-1]))
+
+            if matched_points:
+                for pt in matched_points:
+                    cX = pt[0] + template_width // 2 + monitor["left"]
+                    cY = pt[1] + template_height // 2 + monitor["top"]
+                    self.click_at(cX, cY)
+                    self.logger.log(f'Клік по знайденому зображенню собаки: {cX} {cY}')
+                found = True
+                break
+
+        if not found:
+            self.logger.log("Не вдалося знайти зображення собаки на екрані.")
+
+
 
     def check_and_click_freeze_button(self, sct, monitor):
         freeze_hsvs = [self.hex_to_hsv(color) for color in config.FREEZE_COLORS_HEX]
